@@ -48,11 +48,11 @@ method_access_flags = [
 ]
 
 def parse_flags(value: int, flags: list[tuple[str, int]]) -> list[str]:
-    return [name for (name, mask) in flags if (value&mask) != 0]
+    return [name for (name, mask) in flags if (value & mask) != 0]
 
-def parse_u1(f): return int.from_bytes(f.read(1), 'big')
-def parse_u2(f): return int.from_bytes(f.read(2), 'big')
-def parse_u4(f): return int.from_bytes(f.read(4), 'big')
+def parse_u1(f: io.BufferedReader | io.BytesIO): return int.from_bytes(f.read(1), 'big')
+def parse_u2(f: io.BufferedReader | io.BytesIO): return int.from_bytes(f.read(2), 'big')
+def parse_u4(f: io.BufferedReader | io.BytesIO): return int.from_bytes(f.read(4), 'big')
 
 def parse_attributes(f, count):
     attributes = []
@@ -69,6 +69,23 @@ def parse_attributes(f, count):
         attributes.append(attribute)
     return attributes
 
+def bytes_to_float(bits) -> float:
+    if bits == 0x7f800000:
+        return float('inf')
+    elif bits == 0xff800000:
+        return -float('inf')
+    elif 0x7f800001 <= bits <= 0x7fffffff or 0xff800001 <= bits <= 0xffffffff:
+        return None
+    else:
+        s = 1 if ((bits >> 31) == 0) else -1
+        e = ((bits >> 23) & 0xff)
+        m = (bits & 0x7fffff) << 1 if (e == 0) else (bits & 0x7fffff) | 0x800000
+        # TODO fix this
+        return s * m * 2 ** (e - 150)
+
+def bytes_to_long(high_bytes, low_bytes) -> int:
+    return (high_bytes << 32) + low_bytes
+
 def parse_class_file(file_path):
     with open(file_path, "rb") as f:
         clazz = {}
@@ -77,7 +94,9 @@ def parse_class_file(file_path):
         clazz['major'] = parse_u2(f)
         constant_pool_count = parse_u2(f)
         constant_pool = []
-        for i in range(constant_pool_count-1):
+        n = 1
+        # constant_pool table is indexed from 1 to constant_pool_count - 1
+        while n < constant_pool_count:
             cp_info = {}
             tag = parse_u1(f)
             if tag == CONSTANT_Methodref:
@@ -93,18 +112,42 @@ def parse_class_file(file_path):
                 cp_info['descriptor_index'] = parse_u2(f)
             elif tag == CONSTANT_Utf8:
                 cp_info['tag'] = 'CONSTANT_Utf8'
-                length = parse_u2(f);
+                length = parse_u2(f)
                 cp_info['bytes'] = f.read(length)
             elif tag == CONSTANT_Fieldref:
                 cp_info['tag'] = 'CONSTANT_Fieldref'
                 cp_info['class_index'] = parse_u2(f)
                 cp_info['name_and_type_index'] = parse_u2(f)
             elif tag == CONSTANT_String:
+                # https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.4.3
                 cp_info['tag'] = 'CONSTANT_String'
                 cp_info['string_index'] = parse_u2(f)
+            elif tag == CONSTANT_Integer:
+                cp_info['tag'] = 'CONSTANT_Integer'
+                cp_info['bytes'] = parse_u4(f)
+            elif tag == CONSTANT_Float:
+                # https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.4.5
+                cp_info['tag'] = 'CONSTANT_Float'
+                cp_info['bytes'] = parse_u4(f)
+            # constant_pool index (n + 1) must be valid but is considered unusable
+            # In retrospect, making 8-byte constants take two constant pool entries was a poor choice.
+            elif tag == CONSTANT_Long:
+                cp_info['tag'] = 'CONSTANT_Long'
+                cp_info['high_bytes'] = parse_u4(f)
+                cp_info['low_bytes'] = parse_u4(f)
+                n += 1
+                constant_pool.append(None)
+            elif tag == CONSTANT_Double:
+                cp_info['tag'] = 'CONSTANT_Double'
+                cp_info['high_bytes'] = parse_u4(f)
+                cp_info['low_bytes'] = parse_u4(f)
+                n += 1
+                constant_pool.append(None)
             else:
                 raise NotImplementedError(f"Unexpected constant tag {tag} in class file {file_path}")
             constant_pool.append(cp_info)
+            n += 1
+        # print('\n'.join(str(cp) for cp in constant_pool))
         clazz['constant_pool'] = constant_pool
         clazz['access_flags'] = parse_flags(parse_u2(f), class_access_flags)
         clazz['this_class'] = parse_u2(f)
@@ -112,7 +155,14 @@ def parse_class_file(file_path):
         interfaces_count = parse_u2(f)
         interfaces = []
         for i in range(interfaces_count):
+            # https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.4.1
+            interface = {}
+            interface['tag'] = parse_u1(f)
+            interface['name_index'] = parse_u2(f)
+            interfaces.append(interface)
+        # print(interfaces)
             raise NotImplementedError("We don't support interfaces")
+
         clazz['interfaces'] = interfaces
         fields_count = parse_u2(f)
         fields = []
@@ -176,11 +226,26 @@ def parse_code_info(info: bytes):
         # NOTE: parsing the code attribute is not finished
         return code
 
-getstatic_opcode = 0xB2
-ldc_opcode = 0x12
-invokevirtual_opcode = 0xB6
-return_opcode = 0xB1
-bipush_opcode = 0x10
+iconst_m1 = 0x2
+iconst_0 = 0x3
+iconst_1 = 0x4
+iconst_2 = 0x5
+iconst_3 = 0x6
+iconst_4 = 0x7
+iconst_5 = 0x8
+
+getstatic = 0xb2
+ldc = 0x12
+invokevirtual = 0xb6
+return_ = 0xb1
+bipush = 0x10
+fconst_0 = 0xb
+fconst_1 = 0xc
+fconst_2 = 0xd
+sipush = 0x11
+lconst_0 = 0x9
+lconst_1 = 0xa
+ldc2_w = 0x14
 
 def get_name_of_class(clazz, class_index: int) -> str:
     return clazz['constant_pool'][clazz['constant_pool'][class_index - 1]['name_index'] - 1]['bytes'].decode('utf-8')
@@ -193,7 +258,7 @@ def execute_code(clazz, code: bytes):
     with io.BytesIO(code) as f:
         while f.tell() < len(code):
             opcode = parse_u1(f)
-            if opcode == getstatic_opcode:
+            if opcode == getstatic:
                 index = parse_u2(f)
                 fieldref = clazz['constant_pool'][index - 1]
                 name_of_class = get_name_of_class(clazz, fieldref['class_index'])
@@ -202,14 +267,14 @@ def execute_code(clazz, code: bytes):
                     stack.append({'type': 'FakePrintStream'})
                 else:
                     raise NotImplementedError(f"Unsupported member {name_of_class}/{name_of_member} in getstatic instruction")
-            elif opcode == ldc_opcode:
+            elif opcode == ldc:
                 index = parse_u1(f)
                 stack.append({'type': 'Constant', 'const': clazz['constant_pool'][index - 1]})
-            elif opcode == invokevirtual_opcode:
+            elif opcode == invokevirtual:
                 index = parse_u2(f)
                 methodref = clazz['constant_pool'][index - 1]
                 name_of_class = get_name_of_class(clazz, methodref['class_index'])
-                name_of_member = get_name_of_member(clazz, methodref['name_and_type_index']);
+                name_of_member = get_name_of_member(clazz, methodref['name_and_type_index'])
                 if name_of_class == 'java/io/PrintStream' and name_of_member == 'println':
                     stack_len = len(stack)
                     if stack_len < 2:
@@ -220,20 +285,74 @@ def execute_code(clazz, code: bytes):
                     arg = stack[stack_len - 1]
                     if arg['type'] == 'Constant':
                         if arg['const']['tag'] == 'CONSTANT_String':
+                            # index_to_string_in_constant_pool = arg['const']['string_index'] - 1
                             print(clazz['constant_pool'][arg['const']['string_index'] - 1]['bytes'].decode('utf-8'))
+                        elif arg['const']['tag'] == 'CONSTANT_Integer':
+                            print(arg['const']['bytes'])
+                        elif arg['const']['tag'] == 'CONSTANT_Float':
+                            print(bytes_to_float(arg['const']['bytes']))
+                        elif arg['const']['tag'] == 'CONSTANT_Long':
+                            arg['const']
+                            print(bytes_to_long(
+                                arg['const']['high_bytes'],
+                                arg['const']['low_bytes']
+                            ))
+                        # elif arg['const']['tag'] == 'CONSTANT_Double':
+                        #     print(clazz['constant_pool'][arg['const']['string_index'] - 1]['bytes'].decode('utf-8'))
                         else:
                             raise NotImplementedError(f"println for {arg['const']['tag']} is not implemented")
-                    elif arg['type'] == 'Integer':
+                    elif arg['type'] == 'Integer' or arg['type'] == 'Short':
+                        print(arg['value'])
+                    elif arg['type'] == 'Float':
+                        # TODO print with precision?
+                        print(arg['value'])
+                    elif arg['type'] == 'Long':
+                        # for lconst
                         print(arg['value'])
                     else:
                         raise NotImplementedError(f"Support for {arg['type']} is not implemented")
                 else:
                     raise NotImplementedError(f"Unknown method {name_of_class}/{name_of_member} in invokevirtual instruction")
-            elif opcode == return_opcode:
+            elif opcode == return_:
+                # TODOO ??
                 return
-            elif opcode == bipush_opcode:
+            elif opcode == bipush:
                 byte = parse_u1(f)
                 stack.append({'type': 'Integer', 'value': byte})
+            elif opcode == iconst_m1:
+                stack.append({'type': 'Integer', 'value': -1})
+            elif opcode == iconst_0:
+                stack.append({'type': 'Integer', 'value': 0})
+            elif opcode == iconst_1:
+                stack.append({'type': 'Integer', 'value': 1})
+            elif opcode == iconst_2:
+                stack.append({'type': 'Integer', 'value': 2})
+            elif opcode == iconst_3:
+                stack.append({'type': 'Integer', 'value': 3})
+            elif opcode == iconst_4:
+                stack.append({'type': 'Integer', 'value': 4})
+            elif opcode == iconst_5:
+                stack.append({'type': 'Integer', 'value': 5})
+            elif opcode == fconst_0:
+                stack.append({'type': 'Float', 'value': 0.0})
+            elif opcode == fconst_1:
+                stack.append({'type': 'Float', 'value': 1.0})
+            elif opcode == fconst_2:
+                stack.append({'type': 'Float', 'value': 2.0})
+            elif opcode == sipush:
+                byte1 = parse_u1(f)
+                byte2 = parse_u1(f)
+                # TODO check if Int
+                stack.append({'type': 'Short', 'value': byte1 << 8 | byte2})
+            elif opcode == lconst_0:
+                stack.append({'type': 'Long', 'value': 0})
+            elif opcode == lconst_1:
+                stack.append({'type': 'Long', 'value': 1})
+            elif opcode == ldc2_w:
+                indexbyte1 = parse_u1(f)
+                indexbyte2 = parse_u1(f)
+                index = (indexbyte1 << 8) | indexbyte2
+                stack.append({'type': 'Constant', 'const': clazz['constant_pool'][index]})
             else:
                 raise NotImplementedError(f"Unknown opcode {hex(opcode)}")
 
