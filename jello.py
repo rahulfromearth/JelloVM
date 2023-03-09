@@ -47,7 +47,7 @@ method_access_flags = [
     ("ACC_SYNTHETIC", 0x1000),
 ]
 
-def parse_flags(value: int, flags: [(str, int)]) -> [str]:
+def parse_flags(value: int, flags: list[tuple[str, int]]) -> list[str]:
     return [name for (name, mask) in flags if (value&mask) != 0]
 
 def parse_u1(f): return int.from_bytes(f.read(1), 'big')
@@ -189,7 +189,7 @@ def get_name_of_member(clazz, name_and_type_index: int) -> str:
     return clazz['constant_pool'][clazz['constant_pool'][name_and_type_index - 1]['name_index'] - 1]['bytes'].decode('utf-8')
 
 def execute_code(clazz, code: bytes):
-    stack = []
+    stack: list[dict] = []
     with io.BytesIO(code) as f:
         while f.tell() < len(code):
             opcode = parse_u1(f)
@@ -211,13 +211,13 @@ def execute_code(clazz, code: bytes):
                 name_of_class = get_name_of_class(clazz, methodref['class_index'])
                 name_of_member = get_name_of_member(clazz, methodref['name_and_type_index']);
                 if name_of_class == 'java/io/PrintStream' and name_of_member == 'println':
-                    n = len(stack)
-                    if len(stack) < 2:
-                        raise RuntimeError('{name_of_class}/{name_of_member} expectes 2 arguments, but provided {n}')
-                    obj = stack[len(stack) - 2]
+                    stack_len = len(stack)
+                    if stack_len < 2:
+                        raise RuntimeError(f'{name_of_class}/{name_of_member} expects 2 arguments, but provided {stack_len}')
+                    obj = stack[stack_len - 2]
                     if obj['type'] != 'FakePrintStream':
                         raise NotImplementedError(f"Unsupported stream type {obj['type']}")
-                    arg = stack[len(stack) - 1]
+                    arg = stack[stack_len - 1]
                     if arg['type'] == 'Constant':
                         if arg['const']['tag'] == 'CONSTANT_String':
                             print(clazz['constant_pool'][arg['const']['string_index'] - 1]['bytes'].decode('utf-8'))
